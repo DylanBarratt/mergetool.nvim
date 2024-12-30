@@ -1,0 +1,6 @@
+- open the current change in a buffer on the left
+    - highlight the change
+- open the incoming change in a buffer on the right
+    - highlight the change
+- open the parent version in a buffer on the bottom
+- allow the user to select left or right and have it added to the parent version in the bottom buffer
