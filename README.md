@@ -3,3 +3,4 @@
 - implement user options
     - highlight colours
     - buffer order?
+- write docs
