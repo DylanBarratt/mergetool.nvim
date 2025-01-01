@@ -2,43 +2,62 @@
 ---@field parentBranch string
 ---@field incomingBranch string
 ---@field currentBranch string
----@field conflicts GitConflicts
 ---@class GitConflicts
 ---@field lineNum integer
+---@field currentDiff string
+---@field incomingDiff string
+---@field parentDiff string
 ---@class FileInfo
 ---@field gitInfo GitInfo
+---@field conflicts GitConflicts
 ---@return FileInfo
 local function loopFile(buffNum) -- TODO: better name
-  local fileInfo = { gitInfo = { parentBranch = "", incomingBranch = "", currentBranch = "" }, conflicts = {} }
+  local fileInfo =
+    { gitInfo = { parentBranch = "", incomingBranch = "", currentBranch = "" }, conflicts = {} }
 
-  for lineNum = 1, vim.api.nvim_buf_line_count(buffNum) do
+  local conflictMarkerStart = "<<<<<<<"
+  local parentMarkerStart = "|||||||"
+  local conflictMarkerEnd = ">>>>>>>"
+
+  local lineNum = 1
+  while lineNum < vim.api.nvim_buf_line_count(buffNum) do
     local curLine = vim.api.nvim_buf_get_lines(buffNum, lineNum - 1, lineNum, false)[1]
 
-    local conflictMarkerStart = "<<<<<<<"
-    local parentMarkerStart = "|||||||"
-    local conflictMarkerEnd = ">>>>>>>"
-
-    -- conflict found
+    -- conflict start found
     if string.find(curLine, conflictMarkerStart) then
-      -- store gitInfo
+      -- add a new conflict loc
+      fileInfo.conflicts[#fileInfo.conflicts + 1] = {
+        lineNum = lineNum,
+        -- ERROR: this only gets one line, needs to get all lines between conflict markers
+        -- currentDiff = vim.api.nvim_buf_get_lines(buffNum, lineNum, lineNum + 1, false)[1],
+        -- parentDiff = vim.api.nvim_buf_get_lines(buffNum, lineNum + 2, lineNum + 3, false)[1],
+        -- incomingDiff = vim.api.nvim_buf_get_lines(buffNum, lineNum + 4, lineNum + 5, false)[1],
+      }
+
       if fileInfo.gitInfo.currentBranch == "" then
         fileInfo.gitInfo.currentBranch = string.sub(curLine, string.len(conflictMarkerStart) + 2)
-        local parentLine = vim.api.nvim_buf_get_lines(buffNum, lineNum - 1 + 2, lineNum + 2, false)[1]
-        fileInfo.gitInfo.parentBranch = string.sub(parentLine, string.len(parentMarkerStart) + 2)
-        local incomingLine = vim.api.nvim_buf_get_lines(buffNum, lineNum - 1 + 6, lineNum + 6, false)[1]
-        fileInfo.gitInfo.incomingBranch = string.sub(incomingLine, string.len(conflictMarkerEnd) + 2)
-      end
 
-      -- add a new conflict loc
-      table.insert(fileInfo.conflicts, {
-        lineNum = lineNum,
-        -- states = {
-        --   current = vim.api.nvim_buf_get_lines(buffNum, lineNum, lineNum + 1, false)[1],
-        --   parent = vim.api.nvim_buf_get_lines(buffNum, lineNum + 2, lineNum + 3, false)[1],
-        --   incoming = vim.api.nvim_buf_get_lines(buffNum, lineNum + 4, lineNum + 5, false)[1],
-        -- },
-      })
+        -- loop thru conflict to find other markers
+        local conflictCurLine
+        local lineCount = lineNum + 1
+        repeat
+          conflictCurLine = vim.api.nvim_buf_get_lines(buffNum, lineCount - 1, lineCount, false)[1]
+          lineCount = lineCount + 1
+
+          if string.find(conflictCurLine, parentMarkerStart) and fileInfo.gitInfo.parentBranch == "" then
+            fileInfo.gitInfo.parentBranch = string.sub(conflictCurLine, string.len(parentMarkerStart) + 2)
+          end
+
+          if string.find(conflictCurLine, conflictMarkerEnd) and fileInfo.gitInfo.incomingBranch == "" then
+            fileInfo.gitInfo.incomingBranch = string.sub(conflictCurLine, string.len(conflictMarkerEnd) + 2)
+          end
+        until string.find(conflictCurLine, conflictMarkerEnd)
+
+        lineNum = lineCount - 1 -- skip over these lines in the loop
+      end
     end
+
+    lineNum = lineNum + 1
   end
 
   return fileInfo
@@ -67,11 +86,11 @@ local function loadBuffers()
 end
 
 ---@param buffers MergeBuffers
----@param fileInfo FileInfo
-local function populateBuffers(buffers, fileInfo)
+---@param gitInfo GitInfo
+local function populateBuffers(buffers, gitInfo)
   local currentContent = vim.fn.system("git show HEAD:file1.txt")
-  local incomingContent = vim.fn.system("git show " .. fileInfo.gitInfo.incomingBranch .. ":file1.txt")
-  local baseContent = vim.fn.system("git show " .. fileInfo.gitInfo.parentBranch .. ":file1.txt")
+  local incomingContent = vim.fn.system("git show " .. gitInfo.incomingBranch .. ":file1.txt")
+  local baseContent = vim.fn.system("git show " .. gitInfo.parentBranch .. ":file1.txt")
 
   local function set_buf_content(buf, content)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(content, "\n", { trimempty = false }))
@@ -155,27 +174,59 @@ end
 --   })
 -- end
 
+-- create a command that can only be used in the merge editor
+---@param buffers MergeBuffers
+---@param conflicts GitConflicts
+local function userCommand(buffers, conflicts)
+  local function setParent(new)
+    local newLines = vim.split(new, "\n", { trimempty = false })
+    vim.api.nvim_buf_set_lines(
+      buffers.baseBuffer,
+      -- ERROR: only changes one line
+      conflicts[1].lineNum - 1,
+      conflicts[1].lineNum + #newLines - 1,
+      false,
+      newLines
+    )
+  end
+
+  vim.api.nvim_create_user_command("Mergetool", function(event)
+    if event.args == "current" then
+      setParent(conflicts[1].currentDiff)
+    elseif event.args == "incoming" then
+      setParent(conflicts[1].incomingDiff)
+    elseif event.args == "parent" then
+      setParent(conflicts[1].parentDiff)
+    else
+      print("incorrect argument, please use current, incoming, or parent")
+    end
+  end, {
+    complete = function()
+      return { "current", "incoming", "parent" }
+    end,
+    nargs = 1,
+  })
+end
+
 function Main()
   -- TODO: check if this is a git repo
   -- TODO: stop execution if no conflicts found
 
+  -- TODO: could add a user opt/command input to choose the buffer here
   local fileInfo = loopFile(0)
-
   local buffers = loadBuffers()
 
-  populateBuffers(buffers, fileInfo)
-
-  splitBuffers(buffers)
+  populateBuffers(buffers, fileInfo.gitInfo)
 
   -- TODO: use user opt here
   highlightDifferences(buffers, "Visual")
 
+  -- display the buffers
+  splitBuffers(buffers)
+
+  userCommand(buffers, fileInfo.conflicts)
+
   -- cleanup(buffers)
-  --
-  -- create a command that can only be used in the merge editor
-  -- vim.api.nvim_create_user_command("Mergetooll", function(opts)
-  --   vim.print(opts.args)
-  -- end, { desc = "Git Mergetool" })
 end
 
 local M = {}

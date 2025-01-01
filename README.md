@@ -1,5 +1,8 @@
-- allow the user to select left or right and have it added to the parent version in the bottom buffer
 - user navigate between conflicts
+    - highlight current conflict
+    - better highlight function? could be done in the initial file loop
+- cleanup after merge conflict has been resolved
+- cleanup if user quits during resolution
 - implement user options
     - highlight colours
     - buffer order?
